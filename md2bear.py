@@ -20,18 +20,16 @@ import os
 import re
 import shutil
 import urllib.parse
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
 
-DEFAULT_SKIP_FOLDERS = {"All notes", "General"}
+ASSET_DIRS = {"attachments", "_resources", "resources", "assets", "media", "images", "files"}
 
-IMAGE_PATTERN = re.compile(
-    r'(!\[[^\]]*\]\()(<?)(\./(?:\.\./)*attachments/([^>)\s]+))(>?\))'
-)
 LINKS_PATTERN = re.compile(r'(\[.*?\]\(((?:[^()]|\((?:[^()]*\)))+)\))')
 WIKI_LINKS_PATTERN = re.compile(r'(\!\[\[(.*?)\]\])')
+WIKI_NOTE_LINKS_PATTERN = re.compile(r'(?<!\!)\[\[(.*?)\]\]')
 
 
 def parse_frontmatter(content: str) -> tuple[dict | None, int]:
@@ -49,17 +47,27 @@ def parse_frontmatter(content: str) -> tuple[dict | None, int]:
 
 
 def parse_date(date_str: str) -> float | None:
-    """Try multiple date formats."""
+    """Parse date string in various formats. Supports ISO 8601 with timezone/fractional seconds."""
     if not date_str or not isinstance(date_str, str):
         return None
+    s = date_str.strip()
+
+    # Try Python's fromisoformat first (handles ISO 8601 with tz, fractional seconds)
+    # Normalize 'Z' suffix to '+00:00' for compatibility with Python < 3.11
+    try:
+        return datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp()
+    except ValueError:
+        pass
+
+    # Additional non-ISO formats
     formats = [
         "%d-%m-%Y %I:%M %p",  # Notesnook: DD-MM-YYYY HH:MM AM/PM
-        "%Y-%m-%d %H:%M:%S",  # ISO-like
-        "%Y-%m-%dT%H:%M:%S",  # ISO
+        "%d-%m-%Y %H:%M",     # DD-MM-YYYY HH:MM (24h)
+        "%Y-%m-%d",           # Bare date
     ]
     for fmt in formats:
         try:
-            return datetime.strptime(date_str.strip(), fmt).timestamp()
+            return datetime.strptime(s, fmt).timestamp()
         except ValueError:
             continue
     return None
@@ -75,6 +83,8 @@ def get_dates(front_matter: dict | None, md_path: Path) -> tuple[float, float]:
             if val:
                 if isinstance(val, datetime):
                     created = val.timestamp()
+                elif isinstance(val, date):
+                    created = datetime(val.year, val.month, val.day).timestamp()
                 else:
                     created = parse_date(str(val))
                 if created:
@@ -84,6 +94,8 @@ def get_dates(front_matter: dict | None, md_path: Path) -> tuple[float, float]:
             if val:
                 if isinstance(val, datetime):
                     updated = val.timestamp()
+                elif isinstance(val, date):
+                    updated = datetime(val.year, val.month, val.day).timestamp()
                 else:
                     updated = parse_date(str(val))
                 if updated:
@@ -207,16 +219,16 @@ def convert_note(
     if first_content_line != title and title:
         content = f"# {title}\n\n{content}"
 
-    # Fix Notesnook-style attachment paths
-    used_attachments = []
+    new_content = content
+    copied_assets = set()
 
-    def replace_notesnook_path(match):
-        prefix = match.group(1)
-        filename = match.group(4)
-        used_attachments.append(filename)
-        return f"{prefix}assets/{filename})"
-
-    new_content = IMAGE_PATTERN.sub(replace_notesnook_path, content)
+    def copy_to_assets(found_path: Path) -> str:
+        """Copy file to assets/ and return the quoted filename."""
+        dest = assets_path / found_path.name
+        if found_path.name not in copied_assets:
+            shutil.copy2(found_path, dest)
+            copied_assets.add(found_path.name)
+        return urllib.parse.quote(found_path.name)
 
     # Process standard markdown links — copy local files to assets
     def process_link(match):
@@ -244,36 +256,40 @@ def convert_note(
         file_path = md_path.parent / unquoted
         found = find_file(file_path, file_map)
         if found:
-            quoted_name = urllib.parse.quote(found.name)
-            shutil.copy2(found, assets_path / found.name)
+            quoted_name = copy_to_assets(found)
             new_content = new_content.replace(full, full.replace(link, f"assets/{quoted_name}"))
 
     for m in LINKS_PATTERN.finditer(new_content):
         process_link(m)
 
-    # Process wiki-links (![[file]])
+    # Process wiki-links for embeds (![[file]] and ![[file|size]])
     for m in WIKI_LINKS_PATTERN.finditer(new_content):
         full = m.group(1)
-        link = m.group(2)
+        raw_link = m.group(2)
+
+        # Strip Obsidian size hint or alias: ![[image.png|300]] → image.png
+        link = raw_link.split('|')[0].strip()
         unquoted = urllib.parse.unquote(link)
         file_path = md_path.parent / unquoted
         found = find_file(file_path, file_map)
 
+        # Check if it's a link to another .md note
         if not found and find_file(Path(str(file_path) + ".md"), file_map):
             new_content = new_content.replace(full, f"[[{unquoted}]]")
             continue
 
         if found:
-            quoted_name = urllib.parse.quote(found.name)
-            shutil.copy2(found, assets_path / found.name)
+            quoted_name = copy_to_assets(found)
             new_content = new_content.replace(full, f"![](assets/{quoted_name})")
 
-    # Copy Notesnook attachments
-    attachments_dir = notes_dir / "attachments"
-    for filename in used_attachments:
-        src = attachments_dir / filename
-        if src.exists():
-            shutil.copy2(src, assets_path / filename)
+    # Process wiki-links for note references ([[Note]] and [[Note|Alias]])
+    for m in WIKI_NOTE_LINKS_PATTERN.finditer(new_content):
+        full = m.group(0)
+        raw_link = m.group(1)
+        # Strip alias: [[Note Title|Display Text]] → Note Title
+        link = raw_link.split('|')[0].strip()
+        if link != raw_link:
+            new_content = new_content.replace(full, f"[[{link}]]")
 
     # Convert HTML <a> links to markdown: <a href="url" ...>text</a> → [text](url)
     new_content = re.sub(r'<a\s+href="([^"]*)"[^>]*>(.*?)</a>', r'[\2](\1)', new_content)
@@ -332,7 +348,7 @@ def convert_note(
     os.utime(text_md_path, (created_ts, updated_ts))
     os.utime(bundle_path, (created_ts, updated_ts))
 
-    return len(used_attachments), all_tags
+    return len(copied_assets), all_tags
 
 
 def main():
@@ -355,8 +371,8 @@ def main():
     parser.add_argument(
         "--skip-folders",
         nargs="*",
-        default=["All notes", "General"],
-        help="Folder names to skip when generating tags (default: 'All notes' 'General')",
+        default=[],
+        help="Folder names to skip when generating tags (e.g. --skip-folders 'All notes' 'General')",
     )
     parser.add_argument(
         "--nested-tags", action="store_true", default=True,
@@ -397,7 +413,7 @@ def main():
 
     md_files = [
         f for f in notes_dir.rglob("*.md")
-        if "attachments" not in f.parts and f.name != "md2bear.py"
+        if not (ASSET_DIRS & set(f.relative_to(notes_dir).parts))
     ]
 
     print(f"Found {len(md_files)} markdown files")

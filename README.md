@@ -7,12 +7,12 @@ Works with exports from **Notesnook**, **Obsidian**, **Joplin**, and other markd
 ## Features
 
 - Converts `.md` files to `.textbundle` (Bear's native import format)
-- Fixes image/attachment paths and copies files into bundles
-- Converts folder structure to Bear hashtags (e.g. `Dev/Docker/` → `#Dev #Docker`)
+- Finds and copies images/attachments into bundles (supports `attachments/`, `_resources/`, `assets/`, `media/`, etc.)
+- Converts folder structure to Bear hashtags (e.g. `Dev/Docker/` → `#Dev/Docker`)
 - Preserves existing frontmatter tags as Bear hashtags
 - Strips YAML frontmatter from output (Bear doesn't render it)
-- Preserves original creation/modification dates
-- Handles wiki-links (`![[file]]`) and standard markdown links
+- Preserves original creation/modification dates (ISO 8601, Notesnook, bare dates)
+- Handles wiki-links (`![[file]]`, `![[file|size]]`, `[[note|alias]]`) and standard markdown links
 - Converts `.md` links to wiki-links (`[[title]]`)
 - Handles duplicate note names across different folders
 - Replaces spaces in tags with underscores for Bear compatibility
@@ -61,19 +61,30 @@ uv run python md2bear.py /path/to/notes --skip-folders "Inbox" "Archive"  # cust
 
 ## Expected input structure
 
+The script auto-detects common attachment directories (`attachments/`, `_resources/`, `resources/`, `assets/`, `media/`, `images/`, `files/`) and excludes them from note conversion.
+
 ```
-notes/
-├── attachments/          # images and files
-│   ├── abc123-photo.jpg
-│   └── def456-image.png
+notes/                          # Notesnook / generic
+├── attachments/
+│   └── photo.jpg
 ├── Dev/
-│   ├── Docker/
-│   │   └── Docker-notes.md
-│   └── Python/
-│       └── Tips.md
-├── Personal/
-│   └── Recipe.md
+│   └── Docker-notes.md
 └── My-note.md
+
+vault/                          # Obsidian
+├── assets/
+│   └── screenshot.png
+├── Projects/
+│   └── Ideas.md
+└── Daily/
+    └── 2024-01-01.md
+
+export/                         # Joplin
+├── _resources/
+│   └── abc123.jpg
+├── Notebook1/
+│   └── Note.md
+└── Note2.md
 ```
 
 ## Output structure
@@ -94,7 +105,8 @@ notes-textbundle/
 
 ## Tested with
 
-- [Notesnook](https://notesnook.com/) markdown export (primary target)
+- [Notesnook](https://notesnook.com/) markdown export
+- [Obsidian](https://obsidian.md/) vault export
 - Generic markdown notes with YAML frontmatter
 
 ## License
