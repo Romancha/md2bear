@@ -1,0 +1,9 @@
+[project]
+name = "md2bear"
+version = "0.1.0"
+description = "Convert markdown notes to TextBundle format for Bear import"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyyaml>=6.0.3",
+]
