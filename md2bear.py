@@ -27,6 +27,36 @@ import yaml
 
 ASSET_DIRS = {"attachments", "_resources", "resources", "assets", "media", "images", "files"}
 
+# Magic bytes → extension mapping for files without extensions
+MAGIC_BYTES = [
+    (b'\x89PNG\r\n\x1a\n', '.png'),
+    (b'\xff\xd8\xff', '.jpg'),
+    (b'GIF87a', '.gif'),
+    (b'GIF89a', '.gif'),
+    (b'RIFF', '.webp'),  # RIFF....WEBP (check further below)
+    (b'BM', '.bmp'),
+    (b'\x00\x00\x01\x00', '.ico'),
+    (b'%PDF', '.pdf'),
+]
+
+
+def detect_extension(file_path: Path) -> str | None:
+    """Detect file type by magic bytes and return appropriate extension."""
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(12)
+    except OSError:
+        return None
+    for magic, ext in MAGIC_BYTES:
+        if header.startswith(magic):
+            # RIFF can be WAV or WEBP — check bytes 8-12
+            if magic == b'RIFF':
+                if header[8:12] == b'WEBP':
+                    return '.webp'
+                continue
+            return ext
+    return None
+
 LINKS_PATTERN = re.compile(r'(\[.*?\]\(((?:[^()]|\((?:[^()]*\)))+)\))')
 WIKI_LINKS_PATTERN = re.compile(r'(\!\[\[(.*?)\]\])')
 WIKI_NOTE_LINKS_PATTERN = re.compile(r'(?<!\!)\[\[(.*?)\]\]')
@@ -223,24 +253,33 @@ def convert_note(
     copied_assets = set()
 
     def copy_to_assets(found_path: Path) -> str:
-        """Copy file to assets/ and return the quoted filename."""
-        dest = assets_path / found_path.name
-        if found_path.name not in copied_assets:
+        """Copy file to assets/ and return the quoted filename.
+        If the file has no extension, detect type by magic bytes and add one."""
+        name = found_path.name
+        if not found_path.suffix:
+            ext = detect_extension(found_path)
+            if ext:
+                name = name + ext
+        dest = assets_path / name
+        if name not in copied_assets:
             shutil.copy2(found_path, dest)
-            copied_assets.add(found_path.name)
-        return urllib.parse.quote(found_path.name)
+            copied_assets.add(name)
+        return urllib.parse.quote(name)
 
     # Process standard markdown links — copy local files to assets
     def process_link(match):
         nonlocal new_content
         full = match.group(1)
         link = match.group(2)
-        if not link or link.startswith(('#', 'http://', 'https://')):
+        if not link:
             return
-        if re.match(r'^[a-zA-Z\-0-9.]+:', link):
+        # Strip angle brackets: <path> → path (common in Notesnook exports)
+        clean_link = link.strip('<>')
+        if clean_link.startswith(('#', 'http://', 'https://')):
             return
-
-        unquoted = urllib.parse.unquote(link)
+        if re.match(r'^[a-zA-Z\-0-9.]+:', clean_link):
+            return
+        unquoted = urllib.parse.unquote(clean_link)
         basename = os.path.basename(unquoted)
         ext = os.path.splitext(basename)[1].lower()
 
